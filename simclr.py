@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import math
 
 import torch
 import torch.nn.functional as F
@@ -19,7 +20,8 @@ class SimCLR(object):
         self.model = kwargs['model'].to(self.args.device)
         self.optimizer = kwargs['optimizer']
         self.scheduler = kwargs['scheduler']
-        self.writer = SummaryWriter()
+        self.writer = SummaryWriter(log_dir=self.args.out_dir)
+        print(f'output dir: {self.writer.log_dir}')
         logging.basicConfig(filename=os.path.join(self.writer.log_dir, 'training.log'), level=logging.DEBUG)
         self.criterion = torch.nn.CrossEntropyLoss().to(self.args.device)
 
@@ -53,6 +55,15 @@ class SimCLR(object):
 
         logits = logits / self.args.temperature
         return logits, labels
+    
+    def adjust_learning_rate(self, epoch):
+        """Decay the learning rate based on schedule"""
+        cur_lr = self.args.lr * 0.5 * (1. + math.cos(math.pi * epoch / self.args.epochs))
+        for param_group in self.optimizer.param_groups:
+            if 'fix_lr' in param_group and param_group['fix_lr']:
+                param_group['lr'] = self.args.lr
+            else:
+                param_group['lr'] = cur_lr
 
     def train(self, train_loader):
 
@@ -65,8 +76,9 @@ class SimCLR(object):
         logging.info(f"Start SimCLR training for {self.args.epochs} epochs.")
         logging.info(f"Training with gpu: {self.args.disable_cuda}.")
 
-        for epoch_counter in range(self.args.epochs):
-            for images, _ in tqdm(train_loader):
+        for epoch_counter in tqdm(range(self.args.epochs)):
+            self.adjust_learning_rate(epoch_counter)
+            for images, _ in train_loader:
                 images = torch.cat(images, dim=0)
 
                 images = images.to(self.args.device)
@@ -85,17 +97,25 @@ class SimCLR(object):
 
                 if n_iter % self.args.log_every_n_steps == 0:
                     top1, top5 = accuracy(logits, labels, topk=(1, 5))
-                    self.writer.add_scalar('loss', loss, global_step=n_iter)
-                    self.writer.add_scalar('acc/top1', top1[0], global_step=n_iter)
-                    self.writer.add_scalar('acc/top5', top5[0], global_step=n_iter)
-                    self.writer.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
+                    # self.writer.add_scalar('loss', loss, global_step=n_iter)
+                    # self.writer.add_scalar('acc/top1', top1[0], global_step=n_iter)
+                    # self.writer.add_scalar('acc/top5', top5[0], global_step=n_iter)
+                    # self.writer.add_scalar('learning_rate', self.scheduler.get_lr()[0], global_step=n_iter)
+                    print(f'Epoch[{epoch_counter}] iter[{n_iter}]: loss: {loss:.6f} acc/top1: {top1[0]} acc/top5: {top5[0]} lr:{self.scheduler.get_lr()[0]}')
 
                 n_iter += 1
 
             # warmup for the first 10 epochs
-            if epoch_counter >= 10:
-                self.scheduler.step()
+            # if epoch_counter >= 10:
+                # self.scheduler.step()
             logging.debug(f"Epoch: {epoch_counter}\tLoss: {loss}\tTop1 accuracy: {top1[0]}")
+            checkpoint_name = 'checkpoint_last.pth.tar'
+            save_checkpoint({
+                'epoch': self.args.epochs,
+                'arch': self.args.arch,
+                'state_dict': self.model.state_dict(),
+                'optimizer': self.optimizer.state_dict(),
+            }, is_best=False, filename=os.path.join(self.writer.log_dir, checkpoint_name))
 
         logging.info("Training has finished.")
         # save model checkpoints
